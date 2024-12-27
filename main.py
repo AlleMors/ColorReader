@@ -1,198 +1,197 @@
 import numpy as np
-import serial
-import time
 import pandas as pd
-from matplotlib import pyplot as plt
+import serial
+import matplotlib.pyplot as plt
+from scipy.signal import savgol_filter
 
-
-# Format of the data transmitted by the serial streamer (Nucleo_L476RG +
-# STEAVL-AKI001V1)
-# byte 1 --> '*'
-# byte 2 --> '*'
-# byte 3 --> lower byte of IN4
-# byte 4 --> upper byte of IN4
-# byte 5 --> lower byte of IN5
-# byte 6 --> upper byte of IN5
 
 def convert_bits_to_voltage(v_range, n_bits, value_in, v_lim):
+    """Converts ADC bits to voltage."""
     v_out = value_in * v_range / (2 ** n_bits)
-
-    # checking the v_out to eliminate peaks
-    if v_out > v_lim:
-        v_out = v_lim
-
-    return v_out
+    return min(v_out, v_lim)  # Ensure v_out does not exceed v_lim
 
 
-# clean readed data by chat gpt
 def clean_data(ser):
+    """Reads and cleans data from the serial port."""
     while True:
-        data = ser.read(1)
-        if data == b'*':  # se leggo il primo asterisco
-            data = ser.read(1)  # vedo se ce n'è un secondo
-            if data == b'*':  # se leggo il secondo asterisco dopo il primo
-                data = ser.read(4)  # leggi i 4 bytes  dati
-                if data:
-                    # Convertiamo i 4 byte in un array di 4 interi
-                    int_values = [int.from_bytes(data[i:i + 1], byteorder='big') for i in range(4)]
-                    return int_values
+        if ser.read(1) == b'*' and ser.read(1) == b'*':
+            data = ser.read(4)
+            if len(data) == 4:
+                return [int.from_bytes(data[i:i + 1], byteorder='big') for i in range(4)]
 
 
-def slice_usefull_data(array):
-    # Trova dove i valori sono "accesi" (1)
-    accesi = np.where(array == 1)[0]  # Restituisce gli indici dei valori accesi
+def slice_useful_data(array, threshold_high=None, threshold_low=None):
+    """
+    Identifica e suddivide i dati utili in base a soglie.
 
-    if len(accesi) == 0:
-        # Se non ci sono valori accesi
+    Parametri:
+        array (np.array): Array dei dati.
+        threshold_high (float, opzionale): Soglia superiore per considerare i dati "alti".
+        threshold_low (float, opzionale): Soglia inferiore per considerare i dati "bassi".
+
+    Restituisce:
+        array (np.array): Array originale.
+        start (int): Inizio del primo intervallo utile.
+        end (int): Fine del primo intervallo utile.
+    """
+    # Se le soglie non sono specificate, calcolale automaticamente
+    if threshold_high is None or threshold_low is None:
+        mean = np.mean(array)
+        std = np.std(array)
+        threshold_high = mean + 1.5 * std  # Soglia alta (media + 1.5 deviazioni standard)
+        threshold_low = mean - 1.5 * std  # Soglia bassa (media - 1.5 deviazioni standard)
+
+    print(f"Soglie calcolate: threshold_high={threshold_high:.3f}, threshold_low={threshold_low:.3f}")
+
+    # Trova gli indici in cui il valore supera la soglia alta o scende sotto la soglia bassa
+    high_indices = np.where(array > threshold_high)[0]
+    low_indices = np.where(array < threshold_low)[0]
+
+    # Unisci gli indici alti e bassi per trovare l'intervallo utile
+    useful_indices = np.sort(np.concatenate((high_indices, low_indices)))
+
+    if len(useful_indices) == 0:
+        print("Nessun valore utile trovato.")
         return array, None, None
 
-    # Determina l'inizio e la fine del primo intervallo completo di accesi
-    inizio_dati_utili = accesi[0]
-    fine_dati_utili = accesi[0]
+    # Identifica l'inizio e la fine del primo intervallo continuo utile
+    start = useful_indices[0]
+    end = useful_indices[0]
 
-    # Trova il primo intervallo completo, ovvero senza interruzioni
-    for i in range(1, len(accesi)):
-        if accesi[i] == accesi[i - 1] + 1:  # Controlla se i valori sono consecutivi
-            fine_dati_utili = accesi[i]  # Allunga l'intervallo
+    for i in range(1, len(useful_indices)):
+        if useful_indices[i] == useful_indices[i - 1] + 1:
+            end = useful_indices[i]
         else:
-            break  # Una discontinuità interrompe l'intervallo completo
+            break
 
-    print(inizio_dati_utili, fine_dati_utili)
-
-    # Restituisce l'array, l'inizio e la fine dei dati utili
-    return array, inizio_dati_utili, fine_dati_utili
+    print(f"Intervallo utile trovato: start={start}, end={end}")
+    return array, start, end
 
 
 def read_serial_data(ser):
-    # Read raw data from the serial port and
-    # converting each 8-byte array from binary coding to a decimal number
+    """Reads and processes serial data."""
     cleaned_data = clean_data(ser)
-    # print("Data acquired raw value:")
-    # print(cleaned_data)
-
     if not cleaned_data:
-        return
+        return None
 
-    # ADC have 12 coding bits
-    # 1°byte = first 8 coding bits(0; 255)
-    # 2°byte = last 4 coding bits + 4 empty bits (256;4096)
-    # to unite the 2 decimal numbers represented by the 2 bytes in only 1 decimal number limited between ( 0 ; 2^12 = 4096)
+    data_acquired = [
+        cleaned_data[0] + 256 * cleaned_data[1],
+        cleaned_data[2] + 256 * cleaned_data[3],
+    ]
 
-    data_acquired = [cleaned_data[0] + 256 * cleaned_data[1],
-                     cleaned_data[2] + 256 * cleaned_data[3]]
-
-    # print("Data Converted beetween [0;4096] :")
-    # print(data_acquired)
-
-    # print("Data in V:")
     data_acquired[0] = convert_bits_to_voltage(3.3, 12, data_acquired[0], 3.3)
     data_acquired[1] = convert_bits_to_voltage(2.5, 12, data_acquired[1], 1.5)
 
-    # print(data_acquired)
     return data_acquired
 
 
-def plotting_read_data(data_array, title, ch):
-    if ch == 5:
-        plt.plot(data_array.round(2))
-        plt.xlabel('Index')
-        plt.ylabel('Value')
-        plt.title(str(title))
-        plt.show()
+def smooth_data(data, window_length=11, polyorder=2):
+    """Applies Savitzky-Golay filter to smooth data."""
+    if window_length % 2 == 0:
+        window_length += 1  # Ensure window length is odd
+    if window_length > len(data):
+        window_length = len(data)  # Ensure window length is not greater than data size
+    return savgol_filter(data, window_length=window_length, polyorder=polyorder)
 
-    if ch == 4:
-        # Define the ranges and colors
-        ranges = [
-            (500, 2500, 'red'),
-            (3500, 5500, 'green'),
-            (6500, 8500, 'blue')
-        ]
+def calculate_thresholds(data, k=2):
+    """Calculates dynamic thresholds based on mean and standard deviation."""
+    mean = np.mean(data)
+    std = np.std(data)
+    high_threshold = mean + k * std
+    low_threshold = mean - k * std
+    return high_threshold, low_threshold
 
-        # Create the plot
-        plt.figure()
 
-        # Plot each range with its corresponding color
-        for start, end, color in ranges:
-            plt.plot(np.arange(start, end + 1), data_array[start:end + 1], color=color, label=color)
+def classify_data(data, high_threshold, low_threshold):
+    """Classifies data as high or low based on thresholds."""
+    high_indices = np.where(data > high_threshold)[0]
+    low_indices = np.where(data < low_threshold)[0]
+    return high_indices, low_indices
 
-        # Add labels and title
-        plt.xlabel("Index")
-        plt.ylabel("Value")
-        plt.title("Colored Sections of Data")
 
-        # Add legend
-        plt.legend()
+def plot_classified_data(data, smoothed_data, high_threshold, low_threshold, high_indices, low_indices):
+    """Plots classified data with thresholds."""
+    plt.figure(figsize=(10, 6))
+    plt.plot(data, label="Raw Data", alpha=0.5, color='gray')
+    plt.plot(smoothed_data, label="Smoothed Data", linewidth=2, color='blue')
+    plt.axhline(high_threshold, color='red', linestyle='--', label="High Threshold")
+    plt.axhline(low_threshold, color='green', linestyle='--', label="Low Threshold")
+    plt.scatter(high_indices, smoothed_data[high_indices], color='red', label="High Values", zorder=5)
+    plt.scatter(low_indices, smoothed_data[low_indices], color='green', label="Low Values", zorder=5)
+    plt.xlabel("Sample Index")
+    plt.ylabel("Voltage (V)")
+    plt.title("Voltage Analysis with Thresholds")
+    plt.legend()
+    plt.show()
 
-        # Show the plot
-        plt.show()
+def simple_plot(csv_file):
+    """Reads data from a CSV file and plots it using matplotlib."""
+    data = pd.read_csv(csv_file)
+    plt.figure(figsize=(10, 6))
+    for column in data.columns:
+        plt.plot(data[column], label=column)
+    plt.xlabel('Index')
+    plt.ylabel('Values')
+    plt.title('Simple Plot')
+    plt.legend()
+    plt.show()
+
+def save_data_to_csv(filename, data_array):
+    """Saves data to a CSV file."""
+    np.savetxt(filename, data_array, delimiter=',')
+
+
+def main():
+    serial_port = '/dev/ttyUSB0'
+    baud_rate = 921600
+    max_measurements = 25000
+
+    try:
+        ser = serial.Serial(serial_port, baud_rate)
+        ser.flushInput()
+
+        ch4_data = []
+        ch5_data = []
+
+        while len(ch4_data) < max_measurements:
+            data = read_serial_data(ser)
+            if data:
+                ch4_data.append(data[0])
+                ch5_data.append(data[1])
+                print(f"Measurement {len(ch4_data)}")
+
+        ch4_data = np.array(ch4_data)
+        ch5_data = np.array(ch5_data)
+
+        save_data_to_csv('ch4.csv', ch4_data)
+        save_data_to_csv('ch5.csv', ch5_data)
+
+        ch5_data, start, end = slice_useful_data(ch5_data)
+        if start is not None and end is not None:
+            ch4_data = ch4_data[start:end]
+
+            # Smooth the data
+            smoothed_data = smooth_data(ch4_data)
+
+            # Calculate thresholds
+            high_threshold, low_threshold = calculate_thresholds(smoothed_data)
+
+            # Classify the data
+            high_indices, low_indices = classify_data(smoothed_data, high_threshold, low_threshold)
+
+            # Plot classified data
+            plot_classified_data(ch4_data, smoothed_data, high_threshold, low_threshold, high_indices, low_indices)
+
+            # Plot the raw data
+            simple_plot('ch4.csv')
+            simple_plot('ch5.csv')
+
+    except serial.SerialException as e:
+        print(f"Serial port error: {e}")
+    finally:
+        if 'ser' in locals() and ser.is_open:
+            ser.close()
 
 
 if __name__ == '__main__':
-    # Serial port configuration
-    serial_port = 'COM9'
-    baud_rate = 921600
-    # Create a serial port object
-    ser = serial.Serial(serial_port, baud_rate)
-
-    # Flush input buffer
-    ser.flushInput()
-
-    # Start reading data (you might want to use a loop or a timer for continuous reading)
-
-    max_measurements = 25000
-    measurements_for_each_color = max_measurements / 3
-    read_data_ch4_array = []
-    read_data_ch5_array = []
-
-    while True:
-        current_measurement_number = len(read_data_ch4_array)
-        if current_measurement_number < max_measurements:
-            out = read_serial_data(ser)
-            read_data_ch4_array.append(out[0])
-            read_data_ch5_array.append(out[1])
-            print(current_measurement_number)
-        else:
-            # calcolo  media delle letture del colore rosso
-            # converto da array a numpy_array
-            # print(read_data_ch4_array)
-            read_data_ch4_array = np.array(read_data_ch4_array)
-            read_data_ch5_array = np.array(read_data_ch5_array)
-
-            # Salva l'array in un file CSV
-            # nella prova ho salvato nei csv le letture di un oggetto BLU
-            np.savetxt('ch4.csv', read_data_ch4_array, delimiter=',')
-            np.savetxt('ch5.csv', read_data_ch5_array, delimiter=',')
-
-            # cutting out the initial data that could be half of a previous measuration cycle
-            read_data_ch5_array, inizio_dati_utili, fine_dati_utili = slice_usefull_data(read_data_ch5_array)
-
-            # reshaping the ch4 array to contain only usefull data
-            read_data_ch4_array = read_data_ch4_array[inizio_dati_utili: fine_dati_utili]
-
-            # Calculate averages for red, green, and blue channels
-            # uso solo i valori centrali degli intervalli di raccolta
-            red_mean = np.mean(read_data_ch4_array[500:2500])
-            green_mean = np.mean(read_data_ch4_array[3500:5500])
-            blue_mean = np.mean(read_data_ch4_array[6500:8500])
-
-            # computing which is the most prevalent colour in the read obj
-            max_mean_value = max(red_mean, green_mean, blue_mean)
-
-            # default color value
-            read_color = 'white'
-
-            # print resulting color
-            if max_mean_value == red_mean:
-                read_color = 'red'
-            elif max_mean_value == green_mean:
-                read_color = 'green'
-            else:
-                read_color = 'blue'
-
-            print("the obj has color: ", read_color)
-
-            plotting_read_data(read_data_ch4_array, "ch4_graph", 4)
-            plotting_read_data(read_data_ch4_array, "ch4_graph", 5)
-            plotting_read_data(read_data_ch5_array, "ch5_graph", 5)
-
-            break
+    main()
