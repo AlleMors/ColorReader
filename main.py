@@ -20,52 +20,51 @@ def clean_data(ser):
                 return [int.from_bytes(data[i:i + 1], byteorder='big') for i in range(4)]
 
 
-def slice_useful_data(array, threshold_high=None, threshold_low=None):
+def slice_useful_data(array, threshold=0.75):
     """
-    Identifica e suddivide i dati utili in base a soglie.
+    Identifies and slices useful data based on a threshold.
 
-    Parametri:
-        array (np.array): Array dei dati.
-        threshold_high (float, opzionale): Soglia superiore per considerare i dati "alti".
-        threshold_low (float, opzionale): Soglia inferiore per considerare i dati "bassi".
+    Parameters:
+        array (np.array): Array of data.
+        threshold (float): Threshold to consider data useful.
 
-    Restituisce:
-        array (np.array): Array originale.
-        start (int): Inizio del primo intervallo utile.
-        end (int): Fine del primo intervallo utile.
+    Returns:
+        array (np.array): Original array.
+        start (int): Start of the first useful interval.
+        end (int): End of the first useful interval.
     """
-    # Se le soglie non sono specificate, calcolale automaticamente
-    if threshold_high is None or threshold_low is None:
-        mean = np.mean(array)
-        std = np.std(array)
-        threshold_high = mean + 1.5 * std  # Soglia alta (media + 1.5 deviazioni standard)
-        threshold_low = mean - 1.5 * std  # Soglia bassa (media - 1.5 deviazioni standard)
+    print(f"Threshold used: {threshold:.3f}")
 
-    print(f"Soglie calcolate: threshold_high={threshold_high:.3f}, threshold_low={threshold_low:.3f}")
+    # Find indices where the value exceeds the threshold
+    high_indices = np.where(array > threshold)[0]
 
-    # Trova gli indici in cui il valore supera la soglia alta o scende sotto la soglia bassa
-    high_indices = np.where(array > threshold_high)[0]
-    low_indices = np.where(array < threshold_low)[0]
-
-    # Unisci gli indici alti e bassi per trovare l'intervallo utile
-    useful_indices = np.sort(np.concatenate((high_indices, low_indices)))
-
-    if len(useful_indices) == 0:
-        print("Nessun valore utile trovato.")
+    if len(high_indices) == 0:
+        print("No useful values found.")
         return array, None, None
 
-    # Identifica l'inizio e la fine del primo intervallo continuo utile
-    start = useful_indices[0]
-    end = useful_indices[0]
+    # Find the longest continuous interval of high values
+    longest_start = high_indices[0]
+    longest_end = high_indices[0]
+    current_start = high_indices[0]
+    current_end = high_indices[0]
 
-    for i in range(1, len(useful_indices)):
-        if useful_indices[i] == useful_indices[i - 1] + 1:
-            end = useful_indices[i]
+    for i in range(1, len(high_indices)):
+        if high_indices[i] == high_indices[i - 1] + 1:
+            current_end = high_indices[i]
         else:
-            break
+            if (current_end - current_start) > (longest_end - longest_start):
+                longest_start = current_start
+                longest_end = current_end
+            current_start = high_indices[i]
+            current_end = high_indices[i]
 
-    print(f"Intervallo utile trovato: start={start}, end={end}")
-    return array, start, end
+    # Check the last interval
+    if (current_end - current_start) > (longest_end - longest_start):
+        longest_start = current_start
+        longest_end = current_end
+
+    print(f"Useful interval found: start={longest_start}, end={longest_end}")
+    return array, longest_start, longest_end
 
 
 def read_serial_data(ser):
@@ -93,48 +92,6 @@ def smooth_data(data, window_length=11, polyorder=2):
         window_length = len(data)  # Ensure window length is not greater than data size
     return savgol_filter(data, window_length=window_length, polyorder=polyorder)
 
-def calculate_thresholds(data, k=2):
-    """Calculates dynamic thresholds based on mean and standard deviation."""
-    mean = np.mean(data)
-    std = np.std(data)
-    high_threshold = mean + k * std
-    low_threshold = mean - k * std
-    return high_threshold, low_threshold
-
-
-def classify_data(data, high_threshold, low_threshold):
-    """Classifies data as high or low based on thresholds."""
-    high_indices = np.where(data > high_threshold)[0]
-    low_indices = np.where(data < low_threshold)[0]
-    return high_indices, low_indices
-
-
-def plot_classified_data(data, smoothed_data, high_threshold, low_threshold, high_indices, low_indices):
-    """Plots classified data with thresholds."""
-    plt.figure(figsize=(10, 6))
-    plt.plot(data, label="Raw Data", alpha=0.5, color='gray')
-    plt.plot(smoothed_data, label="Smoothed Data", linewidth=2, color='blue')
-    plt.axhline(high_threshold, color='red', linestyle='--', label="High Threshold")
-    plt.axhline(low_threshold, color='green', linestyle='--', label="Low Threshold")
-    plt.scatter(high_indices, smoothed_data[high_indices], color='red', label="High Values", zorder=5)
-    plt.scatter(low_indices, smoothed_data[low_indices], color='green', label="Low Values", zorder=5)
-    plt.xlabel("Sample Index")
-    plt.ylabel("Voltage (V)")
-    plt.title("Voltage Analysis with Thresholds")
-    plt.legend()
-    plt.show()
-
-def simple_plot(csv_file):
-    """Reads data from a CSV file and plots it using matplotlib."""
-    data = pd.read_csv(csv_file)
-    plt.figure(figsize=(10, 6))
-    for column in data.columns:
-        plt.plot(data[column], label=column)
-    plt.xlabel('Index')
-    plt.ylabel('Values')
-    plt.title('Simple Plot')
-    plt.legend()
-    plt.show()
 
 def save_data_to_csv(filename, data_array):
     """Saves data to a CSV file."""
@@ -170,21 +127,38 @@ def main():
         if start is not None and end is not None:
             ch4_data = ch4_data[start:end]
 
-            # Smooth the data
-            smoothed_data = smooth_data(ch4_data)
+            # Calculate the length of each color interval
+            interval_length = (end - start) // 3
 
-            # Calculate thresholds
-            high_threshold, low_threshold = calculate_thresholds(smoothed_data)
+            # Calculate averages for red, green, and blue channels
+            red_mean = np.mean(ch4_data[:interval_length])
+            green_mean = np.mean(ch4_data[interval_length:2 * interval_length])
+            blue_mean = np.mean(ch4_data[2 * interval_length:])
 
-            # Classify the data
-            high_indices, low_indices = classify_data(smoothed_data, high_threshold, low_threshold)
+            # Normalize the RGB values to be between 0 and 1
+            max_value = max(red_mean, green_mean, blue_mean)
+            red_value = red_mean / max_value
+            green_value = green_mean / max_value
+            blue_value = blue_mean / max_value
 
-            # Plot classified data
-            plot_classified_data(ch4_data, smoothed_data, high_threshold, low_threshold, high_indices, low_indices)
+            # Display the detected color
+            plt.figure(figsize=(2, 2))
+            plt.imshow([[(red_value, green_value, blue_value)]])
+            plt.axis('off')
+            plt.title(f'Detected Color: R={red_value:.2f}, G={green_value:.2f}, B={blue_value:.2f}')
+            plt.show()
 
             # Plot the raw data
-            simple_plot('ch4.csv')
-            simple_plot('ch5.csv')
+            plt.figure(figsize=(10, 6))
+            plt.plot(ch4_data, label="ch4 Data")
+            plt.axvline(interval_length, color='r', linestyle='--', label="Red Interval")
+            plt.axvline(2 * interval_length, color='g', linestyle='--', label="Green Interval")
+            plt.axvline(3 * interval_length, color='b', linestyle='--', label="Blue Interval")
+            plt.xlabel('Index')
+            plt.ylabel('Voltage (V)')
+            plt.title('ch4 Data with Color Intervals')
+            plt.legend()
+            plt.show()
 
     except serial.SerialException as e:
         print(f"Serial port error: {e}")
